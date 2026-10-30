@@ -570,3 +570,47 @@ class Volume_Extractor:
         volume = torch.nn.functional.unfold(audio2[:,None,None,:],(1,self.hop_size),stride=self.hop_size)[:,:,:n_frames].mean(dim=1)[0]
         volume = torch.sqrt(volume)
         return volume
+
+
+class SQLiteAcousticCache:
+    """
+    Lightweight SQLite-backed key-value cache for pre-computed acoustic features
+    (e.g. F0 curves, HuBERT embeddings, volume contours) to enable fast deterministic replay.
+    """
+    def __init__(self, db_path=":memory:"):
+        import sqlite3
+        self.db_path = db_path
+        self._conn = sqlite3.connect(db_path)
+        self._init_db()
+
+    def _init_db(self):
+        with self._conn:
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS feature_cache (key TEXT PRIMARY KEY, payload BLOB)"
+            )
+
+    def set(self, key: str, tensor: torch.Tensor):
+        import io
+        buffer = io.BytesIO()
+        torch.save(tensor.cpu(), buffer)
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO feature_cache (key, payload) VALUES (?, ?)",
+                (key, buffer.getvalue()),
+            )
+
+    def get(self, key: str) -> Optional[torch.Tensor]:
+        import io
+        cursor = self._conn.cursor()
+        cursor.execute("SELECT payload FROM feature_cache WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        if row:
+            buffer = io.BytesIO(row[0])
+            return torch.load(buffer, weights_only=True)
+        return None
+
+    def close(self):
+        if self._conn:
+            self._conn.close()
+            self._conn = None
+
